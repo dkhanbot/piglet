@@ -154,7 +154,7 @@ static volatile uint8_t  wgCmdTail = 0;
 #define WG_TX_RING     64
 #define WG_TX_PER_TICK 48
 struct WgTxSlot { uint8_t data[WG_TX_SLOT_LEN]; uint8_t len; };
-static WgTxSlot          wgTxRing[WG_TX_RING];
+static WgTxSlot*         wgTxRing = nullptr;  // allocated in wardriveGoBleBegin() (psramPreferCalloc)
 static volatile uint8_t  wgTxHead = 0;
 static volatile uint8_t  wgTxTail = 0;
 
@@ -164,7 +164,7 @@ static volatile uint32_t wgEnq = 0, wgDropFull = 0, wgSent = 0;
 //  Frame building / enqueue
 // ================================================================
 static void wgEnqueueFrame(uint8_t type, uint32_t id, const uint8_t* payload, size_t plen) {
-  if (!wgActive || !wgNotifyOn) return;
+  if (!wgActive || !wgNotifyOn || !wgTxRing) return;
   if (plen > WG_TX_SLOT_LEN - FR_HEADER) plen = WG_TX_SLOT_LEN - FR_HEADER;
   uint8_t next = (wgTxTail + 1) % WG_TX_RING;
   if (next == wgTxHead) { wgDropFull++; return; }      // ring full -> drop
@@ -474,6 +474,8 @@ static void wardriveGoBleBegin(bool isCore) {
   wgStreaming = false;
   wgGpsPresent = false;
   wgTxHead = wgTxTail = 0;
+  if (!wgTxRing)
+    wgTxRing = (WgTxSlot*)psramPreferCalloc(WG_TX_RING, sizeof(WgTxSlot));
   wgCmdHead = wgCmdTail = 0;
   wgConnected = 0;
   wgRebootReq = false;

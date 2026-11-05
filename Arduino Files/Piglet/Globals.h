@@ -8,6 +8,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <TinyGPSPlus.h>
+#include <esp_heap_caps.h>
 #include "PinMapDefs.h"
 #include "Config.h"
 
@@ -83,3 +84,14 @@ extern const uint16_t WARDRIFT_PORT;
 
 // ---- Optional TLS buffer sizing (no-op for broad core compatibility) ----
 inline void tlsMaybeSetBufferSizes(WiFiClientSecure&, int, int) {}
+
+// ---- Large feature buffers ----
+// mbedTLS allocates only from internal RAM (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC),
+// so big buffers for optional features (mesh, BLE bridge) are allocated on
+// first use and placed in PSRAM when present, leaving internal RAM for the
+// TLS handshakes behind WiGLE/WDGoWars/Wardrift uploads. Falls back to
+// internal RAM on boards without PSRAM (e.g. XIAO C3).
+inline void* psramPreferCalloc(size_t n, size_t size) {
+  void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+  return p ? p : calloc(n, size);
+}

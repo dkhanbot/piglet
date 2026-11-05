@@ -148,12 +148,13 @@ static uint32_t jcmkCoreLastSeenMs = 0;  // for JCMK_CORE_TIMEOUT_MS detection
 // state; only sending already-found results is deferred to the slot window.
 #define JCMK_PENDING_MAX 64
 struct JcmkPendingLine { char text[96]; };
-static JcmkPendingLine jcmkPendingBuf[JCMK_PENDING_MAX];
+static JcmkPendingLine* jcmkPendingBuf = nullptr;  // allocated in enterNodeMode() (psramPreferCalloc)
 static uint8_t         jcmkPendingHead = 0, jcmkPendingTail = 0;
 
 static bool jcmkPendingEmpty() { return jcmkPendingHead == jcmkPendingTail; }
 
 static bool jcmkPendingPush(const String& line) {
+  if (!jcmkPendingBuf) return false;
   uint8_t next = (jcmkPendingTail + 1) % JCMK_PENDING_MAX;
   if (next == jcmkPendingHead) return false;  // full — drop rather than block scanning
   size_t n = line.length();
@@ -209,7 +210,7 @@ struct CorTextSlot { char    line[JCMK_TEXT_MAX + 1]; };
 static CorReqSlot          coreReqBuf[CORE_REQ_QUEUE];
 static volatile uint8_t    coreReqHead = 0, coreReqTail = 0;
 
-static CorTextSlot         coreTextBuf[CORE_TEXT_QUEUE];
+static CorTextSlot*        coreTextBuf = nullptr;  // allocated in enterCoreMode() (psramPreferCalloc)
 static volatile uint8_t    coreTextHead = 0, coreTextTail = 0;
 
 // ================================================================
@@ -554,7 +555,7 @@ static void jcmkOnRecv(const esp_now_recv_info_t* info,
     } else if (type == JCMK_MSG_TEXT && len >= 11) {
       const jcmk_text_msg_t* tm = (const jcmk_text_msg_t*)data;
       uint8_t next = (coreTextTail + 1) % CORE_TEXT_QUEUE;
-      if (next != coreTextHead) {
+      if (coreTextBuf && next != coreTextHead) {
         uint16_t slen = (tm->len < JCMK_TEXT_MAX) ? tm->len : JCMK_TEXT_MAX;
         memcpy(coreTextBuf[coreTextTail].line, tm->text, slen);
         coreTextBuf[coreTextTail].line[slen] = '\0';
@@ -998,6 +999,8 @@ void enterNodeMode() {
   jcmkCoreLastSeenMs    = 0;
   jcmkPendingHead       = 0;
   jcmkPendingTail       = 0;
+  if (!jcmkPendingBuf)
+    jcmkPendingBuf = (JcmkPendingLine*)psramPreferCalloc(JCMK_PENDING_MAX, sizeof(JcmkPendingLine));
   jcmkNetworksFound     = 0;
   jcmkSentCount         = 0;
   jcmkSendFailCount     = 0;
@@ -1103,6 +1106,8 @@ void enterCoreMode() {
   coreLastHbMs   = 0;
   coreReqHead = coreReqTail = 0;
   coreTextHead = coreTextTail = 0;
+  if (!coreTextBuf)
+    coreTextBuf = (CorTextSlot*)psramPreferCalloc(CORE_TEXT_QUEUE, sizeof(CorTextSlot));
   memset(coreNodes, 0, sizeof(coreNodes));
 
   // Mesh mode owns the WiFi stack — prevent stopAPIfAllowed() from firing

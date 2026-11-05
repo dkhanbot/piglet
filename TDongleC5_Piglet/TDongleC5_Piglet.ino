@@ -42,6 +42,16 @@
 #include "soc/gpio_sig_map.h"
 #include "esp32-hal-matrix.h"
 #include "YieldSched.h"
+#include <esp_heap_caps.h>
+
+// mbedTLS allocates only from internal RAM (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC),
+// so big buffers for optional features (mesh, BLE bridge) are allocated on
+// first use and placed in PSRAM when present, leaving internal RAM for the
+// TLS handshakes behind WiGLE/WDGoWars/Wardrift uploads.
+static inline void* psramPreferCalloc(size_t n, size_t size) {
+  void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
+  return p ? p : calloc(n, size);
+}
 
 // Firmware version
 #define FIRMWARE_VERSION "v2.84"
@@ -2487,12 +2497,13 @@ static uint32_t jcmkCoreLastSeenMs = 0;  // for JCMK_CORE_TIMEOUT_MS detection
 // state; only sending already-found results is deferred to the slot window.
 #define JCMK_PENDING_MAX 64
 struct JcmkPendingLine { char text[96]; };
-static JcmkPendingLine jcmkPendingBuf[JCMK_PENDING_MAX];
+static JcmkPendingLine* jcmkPendingBuf = nullptr;  // allocated in enterNodeMode() (psramPreferCalloc)
 static uint8_t         jcmkPendingHead = 0, jcmkPendingTail = 0;
 
 static bool jcmkPendingEmpty() { return jcmkPendingHead == jcmkPendingTail; }
 
 static bool jcmkPendingPush(const String& line) {
+  if (!jcmkPendingBuf) return false;
   uint8_t next = (jcmkPendingTail + 1) % JCMK_PENDING_MAX;
   if (next == jcmkPendingHead) return false;  // full — drop rather than block scanning
   size_t n = line.length();
@@ -2551,7 +2562,7 @@ struct CorReqSlot  { uint8_t mac[6]; bool isBiscuit; bool isPiglet; };
 struct CorTextSlot { char    line[JCMK_TEXT_MAX + 1]; };
 static CorReqSlot         coreReqBuf[CORE_REQ_QUEUE];
 static volatile uint8_t   coreReqHead = 0, coreReqTail = 0;
-static CorTextSlot        coreTextBuf[CORE_TEXT_QUEUE];
+static CorTextSlot*       coreTextBuf = nullptr;  // allocated in enterCoreMode() (psramPreferCalloc)
 static volatile uint8_t   coreTextHead = 0, coreTextTail = 0;
 
 // ------------- ESP-Now helpers -----------------------------------
@@ -2867,7 +2878,7 @@ static void jcmkOnRecv(const esp_now_recv_info_t* info,
     } else if (type == JCMK_MSG_TEXT && len >= 11) {
       const jcmk_text_msg_t* tm = (const jcmk_text_msg_t*)data;
       uint8_t next = (coreTextTail + 1) % CORE_TEXT_QUEUE;
-      if (next != coreTextHead) {
+      if (coreTextBuf && next != coreTextHead) {
         uint16_t slen = (tm->len < JCMK_TEXT_MAX) ? tm->len : JCMK_TEXT_MAX;
         memcpy(coreTextBuf[coreTextTail].line, tm->text, slen);
         coreTextBuf[coreTextTail].line[slen] = '\0';
@@ -3100,6 +3111,7 @@ static void enterCoreMode() {
   meshCoreActive=false; coreRecordsRx=0; coreNodeCount=0;
   coreAssignVer=0; coreHbCounter=0; coreLastHbMs=0;
   coreReqHead=coreReqTail=0; coreTextHead=coreTextTail=0;
+  if (!coreTextBuf) coreTextBuf=(CorTextSlot*)psramPreferCalloc(CORE_TEXT_QUEUE, sizeof(CorTextSlot));
   memset(coreNodes, 0, sizeof(coreNodes));
   // Mesh mode owns the WiFi stack — prevent stopAPIfAllowed() from firing
   // WiFi.disconnect(true,true) after esp_now_init() would kill the ESP-Now driver.
@@ -3356,6 +3368,8 @@ static void enterNodeMode() {
   jcmkCoreLastSeenMs    = 0;
   jcmkPendingHead       = 0;
   jcmkPendingTail       = 0;
+  if (!jcmkPendingBuf)
+    jcmkPendingBuf = (JcmkPendingLine*)psramPreferCalloc(JCMK_PENDING_MAX, sizeof(JcmkPendingLine));
   jcmkNetworksFound     = 0;
   jcmkSentCount         = 0;
   jcmkSendFailCount     = 0;
